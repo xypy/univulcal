@@ -36,15 +36,25 @@ static void MNAppendMode(MNUVCMode *modes, NSUInteger *count, NSUInteger capacit
     dispatch_queue_t _readQueue;
     BOOL _running;
     BOOL _rawBulk;
+    struct libusb_transfer *_bulkTransfer;
+    uint8_t *_bulkBuffer;
+    dispatch_group_t _bulkTransferGroup;
+    uint8_t *_jpegBuffer;
+    NSUInteger _jpegLength;
+    BOOL _collectingJPEG;
+    uint8_t _previousJPEGByte;
+    NSUInteger _bulkChunkCount;
+    NSUInteger _oversizedJPEGCount;
     uint64_t _frameCount;
     BOOL _savedJPEGFrame;
 }
 - (void)startHagibisBulkWithWidth:(int)width height:(int)height fps:(int)fps;
-- (void)runHagibisBulk:(struct libusb_device_handle *)usb endpoint:(uint8_t)endpoint;
+- (void)parseHagibisBulkChunk:(NSData *)chunk;
 - (void)deliverJPEG:(const uint8_t *)bytes length:(NSUInteger)length;
 @end
 
 static void MNUVCFrameCallback(uvc_frame_t *frame, void *userPointer);
+static void LIBUSB_CALL MNHagibisBulkCallback(struct libusb_transfer *transfer);
 
 @implementation MNDirectUVCBackend
 
@@ -252,15 +262,36 @@ static void MNUVCFrameCallback(uvc_frame_t *frame, void *userPointer);
         return;
     }
 
-    _rawBulk = YES;
+    _jpegBuffer = malloc(4 * 1024 * 1024);
+    _bulkBuffer = malloc(65536);
+    _bulkTransfer = libusb_alloc_transfer(0);
+    if (!_jpegBuffer || !_bulkBuffer || !_bulkTransfer) {
+        [self fail:@"Hagibis bulk transfer allocation failed"];
+        return;
+    }
+    _jpegLength = 0;
+    _collectingJPEG = NO;
+    _previousJPEGByte = 0;
+    _bulkChunkCount = 0;
+    _oversizedJPEGCount = 0;
+    _bulkTransferGroup = dispatch_group_create();
+    libusb_fill_bulk_transfer(_bulkTransfer, usb, endpoint, _bulkBuffer, 65536,
+                              MNHagibisBulkCallback, (__bridge void *)self, 5000);
     __atomic_store_n(&_running, YES, __ATOMIC_RELEASE);
-    [self note:[NSString stringWithFormat:@"Hagibis raw bulk reader endpoint=0x%02x readBytes=65536 devicePayload=%u",
+    dispatch_group_enter(_bulkTransferGroup);
+    usbResult = libusb_submit_transfer(_bulkTransfer);
+    if (usbResult != LIBUSB_SUCCESS) {
+        dispatch_group_leave(_bulkTransferGroup);
+        __atomic_store_n(&_running, NO, __ATOMIC_RELEASE);
+        [self fail:[NSString stringWithFormat:@"Hagibis async bulk submit failed: %s (%d)",
+                    libusb_error_name(usbResult), usbResult]];
+        return;
+    }
+    _rawBulk = YES;
+    [self note:[NSString stringWithFormat:@"Hagibis async bulk reader endpoint=0x%02x readBytes=65536 devicePayload=%u",
                 endpoint, _streamControl.dwMaxPayloadTransferSize]];
     dispatch_async(dispatch_get_main_queue(), ^{
         [self.delegate uvcBackendDidStartWithWidth:(NSUInteger)width height:(NSUInteger)height fps:(NSUInteger)fps];
-    });
-    dispatch_async(_readQueue, ^{
-        [self runHagibisBulk:usb endpoint:endpoint];
     });
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
         if (__atomic_load_n(&self->_running, __ATOMIC_ACQUIRE) &&
@@ -270,65 +301,58 @@ static void MNUVCFrameCallback(uvc_frame_t *frame, void *userPointer);
     });
 }
 
-- (void)runHagibisBulk:(struct libusb_device_handle *)usb endpoint:(uint8_t)endpoint {
-    const NSUInteger maximumJPEG = 4 * 1024 * 1024;
-    uint8_t *jpeg = malloc(maximumJPEG);
-    uint8_t *chunk = malloc(65536);
-    if (!jpeg || !chunk) {
-        free(jpeg);
-        free(chunk);
-        [self fail:@"Hagibis raw bulk buffer allocation failed"];
-        return;
+- (void)parseHagibisBulkChunk:(NSData *)chunk {
+    const uint8_t *bytes = chunk.bytes;
+    NSUInteger length = chunk.length;
+    if (++_bulkChunkCount <= 3) {
+        [self note:[NSString stringWithFormat:@"async bulk chunk %lu bytes=%lu first=%02x %02x %02x %02x",
+                    (unsigned long)_bulkChunkCount, (unsigned long)length,
+                    bytes[0], length > 1 ? bytes[1] : 0,
+                    length > 2 ? bytes[2] : 0, length > 3 ? bytes[3] : 0]];
     }
-    NSUInteger jpegLength = 0;
-    BOOL collecting = NO;
-    uint8_t previous = 0;
-    NSUInteger transfers = 0;
-    NSUInteger decodeFailures = 0;
-    while (__atomic_load_n(&_running, __ATOMIC_ACQUIRE)) {
-        int received = 0;
-        int result = libusb_bulk_transfer(usb, endpoint, chunk, 65536, &received, 1000);
-        if (received > 0 && (result == LIBUSB_SUCCESS || result == LIBUSB_ERROR_TIMEOUT)) {
-            transfers++;
-            if (transfers <= 3) {
-                [self note:[NSString stringWithFormat:@"raw bulk transfer %lu result=%s bytes=%d first=%02x %02x %02x %02x",
-                            (unsigned long)transfers, libusb_error_name(result), received,
-                            chunk[0], received > 1 ? chunk[1] : 0,
-                            received > 2 ? chunk[2] : 0, received > 3 ? chunk[3] : 0]];
+    for (NSUInteger i = 0; i < length; i++) {
+        uint8_t value = bytes[i];
+        if (!_collectingJPEG) {
+            if (_previousJPEGByte == 0xff && value == 0xd8) {
+                _jpegBuffer[0] = 0xff;
+                _jpegBuffer[1] = 0xd8;
+                _jpegLength = 2;
+                _collectingJPEG = YES;
             }
-            for (int i = 0; i < received; i++) {
-                uint8_t value = chunk[i];
-                if (!collecting) {
-                    if (previous == 0xff && value == 0xd8) {
-                        jpeg[0] = 0xff;
-                        jpeg[1] = 0xd8;
-                        jpegLength = 2;
-                        collecting = YES;
-                    }
-                } else {
-                    if (jpegLength >= maximumJPEG) {
-                        collecting = NO;
-                        jpegLength = 0;
-                        if (decodeFailures++ < 3) [self note:@"raw JPEG exceeded 4 MB; discarded"];
-                    } else {
-                        jpeg[jpegLength++] = value;
-                        if (previous == 0xff && value == 0xd9) {
-                            [self deliverJPEG:jpeg length:jpegLength];
-                            collecting = NO;
-                            jpegLength = 0;
-                        }
-                    }
-                }
-                previous = value;
+        } else if (_jpegLength >= 4 * 1024 * 1024) {
+            _collectingJPEG = NO;
+            _jpegLength = 0;
+            if (_oversizedJPEGCount++ < 3) [self note:@"raw JPEG exceeded 4 MB; discarded"];
+        } else {
+            _jpegBuffer[_jpegLength++] = value;
+            if (_previousJPEGByte == 0xff && value == 0xd9) {
+                [self deliverJPEG:_jpegBuffer length:_jpegLength];
+                _collectingJPEG = NO;
+                _jpegLength = 0;
             }
-        } else if (result != LIBUSB_ERROR_TIMEOUT && __atomic_load_n(&_running, __ATOMIC_ACQUIRE)) {
-            [self note:[NSString stringWithFormat:@"raw bulk read error=%s (%d) bytes=%d",
-                        libusb_error_name(result), result, received]];
-            break;
         }
+        _previousJPEGByte = value;
     }
-    free(jpeg);
-    free(chunk);
+}
+
+static void LIBUSB_CALL MNHagibisBulkCallback(struct libusb_transfer *transfer) {
+    MNDirectUVCBackend *backend = (__bridge MNDirectUVCBackend *)transfer->user_data;
+    BOOL running = __atomic_load_n(&backend->_running, __ATOMIC_ACQUIRE);
+    if (running && transfer->status == LIBUSB_TRANSFER_COMPLETED && transfer->actual_length > 0) {
+        NSData *chunk = [NSData dataWithBytes:transfer->buffer length:(NSUInteger)transfer->actual_length];
+        dispatch_async(backend->_readQueue, ^{ [backend parseHagibisBulkChunk:chunk]; });
+    }
+    if (running && (transfer->status == LIBUSB_TRANSFER_COMPLETED ||
+                    transfer->status == LIBUSB_TRANSFER_TIMED_OUT)) {
+        int result = libusb_submit_transfer(transfer);
+        if (result == LIBUSB_SUCCESS) return;
+        [backend note:[NSString stringWithFormat:@"async bulk resubmit error=%s (%d)",
+                       libusb_error_name(result), result]];
+    } else if (running) {
+        [backend note:[NSString stringWithFormat:@"async bulk transfer status=%d bytes=%d",
+                       transfer->status, transfer->actual_length]];
+    }
+    dispatch_group_leave(backend->_bulkTransferGroup);
 }
 
 - (void)deliverJPEG:(const uint8_t *)bytes length:(NSUInteger)length {
@@ -395,11 +419,25 @@ static void MNUVCFrameCallback(uvc_frame_t *frame, void *userPointer);
     dispatch_async(_queue, ^{
         __atomic_store_n(&self->_running, NO, __ATOMIC_RELEASE);
         if (self->_rawBulk) {
+            int cancelResult = libusb_cancel_transfer(self->_bulkTransfer);
+            if (cancelResult != LIBUSB_SUCCESS && cancelResult != LIBUSB_ERROR_NOT_FOUND) {
+                [self note:[NSString stringWithFormat:@"async bulk cancel error=%s (%d)",
+                            libusb_error_name(cancelResult), cancelResult]];
+            }
+            dispatch_group_wait(self->_bulkTransferGroup, DISPATCH_TIME_FOREVER);
             dispatch_sync(self->_readQueue, ^{});
             self->_rawBulk = NO;
         } else if (self->_handle && !self->_rawStream) {
             uvc_stop_streaming(self->_handle);
         }
+        if (self->_bulkTransfer) {
+            libusb_free_transfer(self->_bulkTransfer);
+            self->_bulkTransfer = NULL;
+        }
+        free(self->_bulkBuffer);
+        self->_bulkBuffer = NULL;
+        free(self->_jpegBuffer);
+        self->_jpegBuffer = NULL;
         if (self->_rawStream) {
             uvc_stream_close(self->_rawStream);
             self->_rawStream = NULL;
