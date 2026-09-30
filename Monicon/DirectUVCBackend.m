@@ -32,6 +32,7 @@ static void MNAppendMode(MNUVCMode *modes, NSUInteger *count, NSUInteger capacit
     dispatch_queue_t _queue;
     BOOL _running;
     uint64_t _frameCount;
+    BOOL _savedJPEGFrame;
 }
 @end
 
@@ -50,6 +51,7 @@ static void MNUVCFrameCallback(uvc_frame_t *frame, void *userPointer);
 - (void)startWithWidth:(NSUInteger)width height:(NSUInteger)height fps:(NSUInteger)fps {
     dispatch_async(_queue, ^{
         __atomic_store_n(&self->_frameCount, 0, __ATOMIC_RELAXED);
+        __atomic_store_n(&self->_savedJPEGFrame, NO, __ATOMIC_RELAXED);
         uvc_error_t result = uvc_init(&self->_context, NULL);
         if (result < 0) {
             [self fail:[NSString stringWithFormat:@"uvc_init failed: %s (%d)", uvc_strerror(result), result]];
@@ -238,21 +240,21 @@ static void MNUVCFrameCallback(uvc_frame_t *frame, void *userPointer) {
     if (!backend->_running || !frame) return;
 
     uint64_t count = __atomic_add_fetch(&backend->_frameCount, 1, __ATOMIC_RELAXED);
+    const uint8_t *bytes = frame->data;
+    BOOL jpeg = frame->data_bytes >= 4 && bytes && bytes[0] == 0xff && bytes[1] == 0xd8;
+    if (jpeg && !__atomic_exchange_n(&backend->_savedJPEGFrame, YES, __ATOMIC_RELAXED)) {
+        NSString *documents = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
+                                                                    NSUserDomainMask, YES).firstObject;
+        NSString *path = [documents stringByAppendingPathComponent:@"first-uvc-frame.jpg"];
+        BOOL saved = [[NSData dataWithBytes:bytes length:frame->data_bytes] writeToFile:path atomically:YES];
+        [backend note:[NSString stringWithFormat:@"first valid MJPEG frame saved=%@ sequence=%u bytes=%zu path=%@",
+                       saved ? @"YES" : @"NO", frame->sequence, frame->data_bytes, path]];
+    }
     if (count <= 3) {
-        const uint8_t *bytes = frame->data;
-        BOOL jpeg = frame->data_bytes >= 4 && bytes && bytes[0] == 0xff && bytes[1] == 0xd8;
         [backend note:[NSString stringWithFormat:
                        @"frame %llu format=%d size=%ux%u bytes=%zu sequence=%u jpegSOI=%@",
                        (unsigned long long)count, frame->frame_format, frame->width, frame->height,
                        frame->data_bytes, frame->sequence, jpeg ? @"YES" : @"NO"]];
-        if (count == 1 && jpeg) {
-            NSString *documents = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
-                                                                        NSUserDomainMask, YES).firstObject;
-            NSString *path = [documents stringByAppendingPathComponent:@"first-uvc-frame.jpg"];
-            BOOL saved = [[NSData dataWithBytes:bytes length:frame->data_bytes] writeToFile:path atomically:YES];
-            [backend note:[NSString stringWithFormat:@"first MJPEG frame saved=%@ path=%@",
-                           saved ? @"YES" : @"NO", path]];
-        }
     }
 
     uvc_frame_t *rgb = uvc_allocate_frame(frame->width * frame->height * 3);
