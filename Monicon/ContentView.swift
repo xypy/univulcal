@@ -149,6 +149,12 @@ struct SettingsView: View {
         NavigationStack {
             Form {
                 Section(L("settings.capture")) {
+                    Picker(L("settings.captureResolution"), selection: $capture.selectedResolution) {
+                        ForEach(capture.captureResolutions, id: \.self) { value in
+                            Text(value == "Auto" ? L("settings.captureResolution.auto") : value).tag(value)
+                        }
+                    }
+                    Text(L("settings.captureResolution.help")).font(.caption).foregroundStyle(.secondary)
                     Picker(L("settings.scale"), selection: $capture.resolutionScale) {
                         ForEach(capture.resolutionScales, id: \.self) { value in
                             Text("\(value)%").tag(value)

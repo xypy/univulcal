@@ -49,6 +49,7 @@ final class CaptureSessionManager: NSObject, ObservableObject {
     private let queue = DispatchQueue(label: "monicon.capture", qos: .userInteractive)
 
     let resolutionScales = [25, 50, 75, 100]
+    let captureResolutions = ["Auto", "1920 × 1080", "1280 × 720", "640 × 480"]
     let frameRates = ["Auto", "60 fps", "30 fps", "24 fps"]
 
     override init() {
@@ -109,8 +110,15 @@ final class CaptureSessionManager: NSObject, ObservableObject {
         log("capture.start", "requested; directUVC=\(usesDirectUVC)")
         if usesDirectUVC {
             let requestedFPS: UInt = selectedFrameRate == "30 fps" ? 30 : selectedFrameRate == "24 fps" ? 24 : 60
-            log("uvc.start", "request native resolution; fps=\(requestedFPS)")
-            directBackend.start(withWidth: 0, height: 0, fps: requestedFPS)
+            let requestedSize: (UInt, UInt)
+            switch selectedResolution {
+            case "1920 × 1080": requestedSize = (1920, 1080)
+            case "1280 × 720": requestedSize = (1280, 720)
+            case "640 × 480": requestedSize = (640, 480)
+            default: requestedSize = (0, 0)
+            }
+            log("uvc.start", "requested width=\(requestedSize.0) height=\(requestedSize.1) fps=\(requestedFPS)")
+            directBackend.start(withWidth: requestedSize.0, height: requestedSize.1, fps: requestedFPS)
             DispatchQueue.main.async {
                 self.isRunning = true
                 if self.status == "Connect a UVC capture card" { self.status = "Opening direct UVC…" }
@@ -258,7 +266,7 @@ final class CaptureSessionManager: NSObject, ObservableObject {
 
     func applyFormat(to device: AVCaptureDevice) {
         guard selectedResolution != "Auto" || selectedFrameRate != "Auto" else { return }
-        let width = selectedResolution == "1920 × 1080" ? 1920 : selectedResolution == "1280 × 720" ? 1280 : 720
+        let width = selectedResolution == "1920 × 1080" ? 1920 : selectedResolution == "1280 × 720" ? 1280 : 640
         let height = selectedResolution == "1920 × 1080" ? 1080 : selectedResolution == "1280 × 720" ? 720 : 480
         let fps = selectedFrameRate == "60 fps" ? 60.0 : selectedFrameRate == "30 fps" ? 30.0 : 24.0
         guard let format = device.formats.first(where: { f in

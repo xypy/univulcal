@@ -7,7 +7,10 @@
 "screen.placeholder.subtitle" = "The full frame stays visible by default.";
 "settings.title" = "Settings";
 "settings.capture" = "Capture";
-"settings.scale" = "Resolution";
+"settings.captureResolution" = "USB capture resolution";
+"settings.captureResolution.auto" = "Auto";
+"settings.captureResolution.help" = "Select the capture card's video mode. Stop and restart capture to apply.";
+"settings.scale" = "Display scale";
 "settings.scale.help" = "Percentage of the capture card's native resolution.";
 "settings.frameRate" = "Frame rate";
 "settings.frameRate.help" = "Keep the current frame-rate options; maximum performance is not required.";

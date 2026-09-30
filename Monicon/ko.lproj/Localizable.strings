@@ -7,7 +7,10 @@
 "screen.placeholder.subtitle" = "기본값은 전체 화면을 표시합니다.";
 "settings.title" = "설정";
 "settings.capture" = "캡처";
-"settings.scale" = "해상도";
+"settings.captureResolution" = "USB 캡처 해상도";
+"settings.captureResolution.auto" = "자동";
+"settings.captureResolution.help" = "캡처 카드의 비디오 모드를 선택합니다. 중지 후 다시 시작하면 적용됩니다.";
+"settings.scale" = "화면 배율";
 "settings.scale.help" = "캡처 카드의 기본 해상도를 기준으로 한 배율입니다.";
 "settings.frameRate" = "프레임 속도";
 "settings.frameRate.help" = "현재 프레임 속도 옵션을 유지합니다. 최고 프레임 속도는 필수가 아닙니다.";

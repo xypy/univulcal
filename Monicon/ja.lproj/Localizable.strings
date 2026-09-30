@@ -7,7 +7,10 @@
 "screen.placeholder.subtitle" = "デフォルトでは映像全体を表示します。";
 "settings.title" = "設定";
 "settings.capture" = "キャプチャ";
-"settings.scale" = "解像度";
+"settings.captureResolution" = "USB キャプチャ解像度";
+"settings.captureResolution.auto" = "自動";
+"settings.captureResolution.help" = "キャプチャカードの映像モードを選択します。停止して再開すると反映されます。";
+"settings.scale" = "表示倍率";
 "settings.scale.help" = "キャプチャカードのネイティブ解像度を基準にした倍率です。";
 "settings.frameRate" = "フレームレート";
 "settings.frameRate.help" = "現在のフレームレート設定を維持します。最高フレームレートは必須ではありません。";

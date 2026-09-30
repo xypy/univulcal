@@ -7,7 +7,10 @@
 "screen.placeholder.subtitle" = "默认完整保留画面。";
 "settings.title" = "设置";
 "settings.capture" = "采集";
-"settings.scale" = "分辨率";
+"settings.captureResolution" = "USB 采集分辨率";
+"settings.captureResolution.auto" = "自动";
+"settings.captureResolution.help" = "选择采集卡的实际视频模式；停止后重新开始生效。";
+"settings.scale" = "画面缩放";
 "settings.scale.help" = "按照采集卡原生分辨率的百分比缩放。";
 "settings.frameRate" = "帧率";
 "settings.frameRate.help" = "保留现有帧率选项；上线版本不强求跑满最高帧率。";
