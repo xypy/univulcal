@@ -202,8 +202,16 @@ static void LIBUSB_CALL MNHagibisBulkCallback(struct libusb_transfer *transfer);
         }
 
         if (isHagibis) {
-            // Keep the device's UVC control intact. A smaller value here made
-            // libuvc misparse a large payload as several independent ones.
+            // The card accepts a 64 KB committed payload and returned frames
+            // with it in 0.1.6. Its reported 3.1 MB payload makes a shorter
+            // transfer fail before any bytes arrive. We parse JPEG ourselves
+            // below, avoiding libuvc's unsafe payload/frame decoder.
+            if (self->_streamControl.dwMaxPayloadTransferSize > 65536) {
+                uint32_t reported = self->_streamControl.dwMaxPayloadTransferSize;
+                self->_streamControl.dwMaxPayloadTransferSize = 65536;
+                [self note:[NSString stringWithFormat:@"Hagibis commit payload: reported=%u requested=%u",
+                            reported, self->_streamControl.dwMaxPayloadTransferSize]];
+            }
             [self startHagibisBulkWithWidth:requestedWidth height:requestedHeight fps:requestedFPS];
             return;
         }
@@ -346,10 +354,10 @@ static void LIBUSB_CALL MNHagibisBulkCallback(struct libusb_transfer *transfer) 
                     transfer->status == LIBUSB_TRANSFER_TIMED_OUT)) {
         int result = libusb_submit_transfer(transfer);
         if (result == LIBUSB_SUCCESS) return;
-        [backend note:[NSString stringWithFormat:@"async bulk resubmit error=%s (%d)",
+        [backend fail:[NSString stringWithFormat:@"async bulk resubmit error=%s (%d)",
                        libusb_error_name(result), result]];
     } else if (running) {
-        [backend note:[NSString stringWithFormat:@"async bulk transfer status=%d bytes=%d",
+        [backend fail:[NSString stringWithFormat:@"async bulk transfer status=%d bytes=%d",
                        transfer->status, transfer->actual_length]];
     }
     dispatch_group_leave(backend->_bulkTransferGroup);
