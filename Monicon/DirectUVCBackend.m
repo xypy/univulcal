@@ -1,4 +1,6 @@
 #import "DirectUVCBackend.h"
+#import "libusb.h"
+#import <ImageIO/ImageIO.h>
 #include <libuvc/libuvc.h>
 #include <string.h>
 
@@ -28,12 +30,18 @@ static void MNAppendMode(MNUVCMode *modes, NSUInteger *count, NSUInteger capacit
     uvc_context_t *_context;
     uvc_device_t *_device;
     uvc_device_handle_t *_handle;
+    uvc_stream_handle_t *_rawStream;
     uvc_stream_ctrl_t _streamControl;
     dispatch_queue_t _queue;
+    dispatch_queue_t _readQueue;
     BOOL _running;
+    BOOL _rawBulk;
     uint64_t _frameCount;
     BOOL _savedJPEGFrame;
 }
+- (void)startHagibisBulkWithWidth:(int)width height:(int)height fps:(int)fps;
+- (void)runHagibisBulk:(struct libusb_device_handle *)usb endpoint:(uint8_t)endpoint;
+- (void)deliverJPEG:(const uint8_t *)bytes length:(NSUInteger)length;
 @end
 
 static void MNUVCFrameCallback(uvc_frame_t *frame, void *userPointer);
@@ -44,6 +52,7 @@ static void MNUVCFrameCallback(uvc_frame_t *frame, void *userPointer);
     self = [super init];
     if (self) {
         _queue = dispatch_queue_create("com.monicon.direct-uvc", DISPATCH_QUEUE_SERIAL);
+        _readQueue = dispatch_queue_create("com.monicon.direct-uvc.bulk", DISPATCH_QUEUE_SERIAL);
     }
     return self;
 }
@@ -182,15 +191,11 @@ static void MNUVCFrameCallback(uvc_frame_t *frame, void *userPointer);
             return;
         }
 
-        // This card reports a 3.1 MB bulk payload for every resolution. The
-        // bundled libuvc uses that value as the size of each USB read. Probe
-        // whether smaller reads allow the active HDMI stream to complete.
-        if (isHagibis && self->_streamControl.dwMaxPayloadTransferSize > 65536) {
-            uint32_t reportedSize = self->_streamControl.dwMaxPayloadTransferSize;
-            self->_streamControl.dwMaxPayloadTransferSize = 65536;
-            [self note:[NSString stringWithFormat:
-                        @"Hagibis bulk payload probe: reported=%u requested=%u",
-                        reportedSize, self->_streamControl.dwMaxPayloadTransferSize]];
+        if (isHagibis) {
+            // Keep the device's UVC control intact. A smaller value here made
+            // libuvc misparse a large payload as several independent ones.
+            [self startHagibisBulkWithWidth:requestedWidth height:requestedHeight fps:requestedFPS];
+            return;
         }
 
         result = uvc_start_streaming(self->_handle, &self->_streamControl, MNUVCFrameCallback, (__bridge void *)self, 0);
@@ -212,6 +217,174 @@ static void MNUVCFrameCallback(uvc_frame_t *frame, void *userPointer);
     });
 }
 
+- (void)startHagibisBulkWithWidth:(int)width height:(int)height fps:(int)fps {
+    uvc_error_t result = uvc_stream_open_ctrl(_handle, &_rawStream, &_streamControl);
+    if (result != UVC_SUCCESS) {
+        [self fail:[NSString stringWithFormat:@"Hagibis bulk open failed: %s (%d)", uvc_strerror(result), result]];
+        return;
+    }
+
+    struct libusb_device_handle *usb = uvc_get_libusb_handle(_handle);
+    struct libusb_config_descriptor *config = NULL;
+    int usbResult = libusb_get_active_config_descriptor(libusb_get_device(usb), &config);
+    uint8_t endpoint = 0;
+    if (usbResult == LIBUSB_SUCCESS && config) {
+        for (int i = 0; i < config->bNumInterfaces && !endpoint; i++) {
+            const struct libusb_interface *interface = &config->interface[i];
+            for (int a = 0; a < interface->num_altsetting && !endpoint; a++) {
+                const struct libusb_interface_descriptor *alt = &interface->altsetting[a];
+                if (alt->bInterfaceNumber != _streamControl.bInterfaceNumber) continue;
+                for (int e = 0; e < alt->bNumEndpoints; e++) {
+                    const struct libusb_endpoint_descriptor *candidate = &alt->endpoint[e];
+                    if ((candidate->bmAttributes & LIBUSB_TRANSFER_TYPE_MASK) == LIBUSB_TRANSFER_TYPE_BULK &&
+                        (candidate->bEndpointAddress & LIBUSB_ENDPOINT_DIR_MASK) == LIBUSB_ENDPOINT_IN) {
+                        endpoint = candidate->bEndpointAddress;
+                        break;
+                    }
+                }
+            }
+        }
+        libusb_free_config_descriptor(config);
+    }
+    if (!endpoint) {
+        [self fail:[NSString stringWithFormat:@"Hagibis bulk endpoint not found: %s (%d)",
+                    libusb_error_name(usbResult), usbResult]];
+        return;
+    }
+
+    _rawBulk = YES;
+    __atomic_store_n(&_running, YES, __ATOMIC_RELEASE);
+    [self note:[NSString stringWithFormat:@"Hagibis raw bulk reader endpoint=0x%02x readBytes=65536 devicePayload=%u",
+                endpoint, _streamControl.dwMaxPayloadTransferSize]];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self.delegate uvcBackendDidStartWithWidth:(NSUInteger)width height:(NSUInteger)height fps:(NSUInteger)fps];
+    });
+    dispatch_async(_readQueue, ^{
+        [self runHagibisBulk:usb endpoint:endpoint];
+    });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        if (__atomic_load_n(&self->_running, __ATOMIC_ACQUIRE) &&
+            __atomic_load_n(&self->_frameCount, __ATOMIC_RELAXED) == 0) {
+            [self note:@"raw bulk reader received no complete JPEG within 5 seconds"];
+        }
+    });
+}
+
+- (void)runHagibisBulk:(struct libusb_device_handle *)usb endpoint:(uint8_t)endpoint {
+    const NSUInteger maximumJPEG = 4 * 1024 * 1024;
+    uint8_t *jpeg = malloc(maximumJPEG);
+    uint8_t *chunk = malloc(65536);
+    if (!jpeg || !chunk) {
+        free(jpeg);
+        free(chunk);
+        [self fail:@"Hagibis raw bulk buffer allocation failed"];
+        return;
+    }
+    NSUInteger jpegLength = 0;
+    BOOL collecting = NO;
+    uint8_t previous = 0;
+    NSUInteger transfers = 0;
+    NSUInteger decodeFailures = 0;
+    while (__atomic_load_n(&_running, __ATOMIC_ACQUIRE)) {
+        int received = 0;
+        int result = libusb_bulk_transfer(usb, endpoint, chunk, 65536, &received, 1000);
+        if (received > 0 && (result == LIBUSB_SUCCESS || result == LIBUSB_ERROR_TIMEOUT)) {
+            transfers++;
+            if (transfers <= 3) {
+                [self note:[NSString stringWithFormat:@"raw bulk transfer %lu result=%s bytes=%d first=%02x %02x %02x %02x",
+                            (unsigned long)transfers, libusb_error_name(result), received,
+                            chunk[0], received > 1 ? chunk[1] : 0,
+                            received > 2 ? chunk[2] : 0, received > 3 ? chunk[3] : 0]];
+            }
+            for (int i = 0; i < received; i++) {
+                uint8_t value = chunk[i];
+                if (!collecting) {
+                    if (previous == 0xff && value == 0xd8) {
+                        jpeg[0] = 0xff;
+                        jpeg[1] = 0xd8;
+                        jpegLength = 2;
+                        collecting = YES;
+                    }
+                } else {
+                    if (jpegLength >= maximumJPEG) {
+                        collecting = NO;
+                        jpegLength = 0;
+                        if (decodeFailures++ < 3) [self note:@"raw JPEG exceeded 4 MB; discarded"];
+                    } else {
+                        jpeg[jpegLength++] = value;
+                        if (previous == 0xff && value == 0xd9) {
+                            [self deliverJPEG:jpeg length:jpegLength];
+                            collecting = NO;
+                            jpegLength = 0;
+                        }
+                    }
+                }
+                previous = value;
+            }
+        } else if (result != LIBUSB_ERROR_TIMEOUT && __atomic_load_n(&_running, __ATOMIC_ACQUIRE)) {
+            [self note:[NSString stringWithFormat:@"raw bulk read error=%s (%d) bytes=%d",
+                        libusb_error_name(result), result, received]];
+            break;
+        }
+    }
+    free(jpeg);
+    free(chunk);
+}
+
+- (void)deliverJPEG:(const uint8_t *)bytes length:(NSUInteger)length {
+    if (length < 256) return;
+    NSData *jpeg = [NSData dataWithBytes:bytes length:length];
+    CGImageSourceRef source = CGImageSourceCreateWithData((__bridge CFDataRef)jpeg, NULL);
+    if (!source) return;
+    NSDictionary *properties = CFBridgingRelease(CGImageSourceCopyPropertiesAtIndex(source, 0, NULL));
+    NSUInteger width = [properties[(NSString *)kCGImagePropertyPixelWidth] unsignedIntegerValue];
+    NSUInteger height = [properties[(NSString *)kCGImagePropertyPixelHeight] unsignedIntegerValue];
+    if (width == 0 || height == 0 || width > 3840 || height > 2160) {
+        CFRelease(source);
+        return;
+    }
+    CGImageRef image = CGImageSourceCreateImageAtIndex(source, 0, NULL);
+    CFRelease(source);
+    if (!image) return;
+    NSUInteger count = __atomic_add_fetch(&_frameCount, 1, __ATOMIC_RELAXED);
+    if (count <= 3) {
+        [self note:[NSString stringWithFormat:@"raw JPEG frame %lu size=%lux%lu bytes=%lu",
+                    (unsigned long)count, (unsigned long)width, (unsigned long)height, (unsigned long)length]];
+    }
+    if (!__atomic_exchange_n(&_savedJPEGFrame, YES, __ATOMIC_RELAXED)) {
+        NSString *documents = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+        NSString *path = [documents stringByAppendingPathComponent:@"first-uvc-frame.jpg"];
+        BOOL saved = [jpeg writeToFile:path atomically:YES];
+        [self note:[NSString stringWithFormat:@"first raw JPEG saved=%@ path=%@",
+                    saved ? @"YES" : @"NO", path]];
+    }
+
+    NSUInteger rgbaBytes = width * height * 4;
+    uint8_t *rgba = malloc(rgbaBytes);
+    uint8_t *rgb = malloc(width * height * 3);
+    CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
+    CGContextRef context = rgba ? CGBitmapContextCreate(rgba, width, height, 8, width * 4,
+                                      colorSpace, kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big) : NULL;
+    if (context && rgb) {
+        CGContextDrawImage(context, CGRectMake(0, 0, width, height), image);
+        for (NSUInteger pixel = 0; pixel < width * height; pixel++) {
+            rgb[pixel * 3] = rgba[pixel * 4];
+            rgb[pixel * 3 + 1] = rgba[pixel * 4 + 1];
+            rgb[pixel * 3 + 2] = rgba[pixel * 4 + 2];
+        }
+        NSData *data = [NSData dataWithBytesNoCopy:rgb length:width * height * 3 freeWhenDone:YES];
+        rgb = NULL;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self.delegate uvcBackendDidReceiveRGB:data width:width height:height];
+        });
+    }
+    if (context) CGContextRelease(context);
+    CGColorSpaceRelease(colorSpace);
+    CGImageRelease(image);
+    free(rgba);
+    free(rgb);
+}
+
 - (void)note:(NSString *)message {
     dispatch_async(dispatch_get_main_queue(), ^{
         [self.delegate uvcBackendDidLog:message];
@@ -220,10 +393,17 @@ static void MNUVCFrameCallback(uvc_frame_t *frame, void *userPointer);
 
 - (void)stop {
     dispatch_async(_queue, ^{
-        if (self->_handle && self->_running) {
+        __atomic_store_n(&self->_running, NO, __ATOMIC_RELEASE);
+        if (self->_rawBulk) {
+            dispatch_sync(self->_readQueue, ^{});
+            self->_rawBulk = NO;
+        } else if (self->_handle && !self->_rawStream) {
             uvc_stop_streaming(self->_handle);
         }
-        self->_running = NO;
+        if (self->_rawStream) {
+            uvc_stream_close(self->_rawStream);
+            self->_rawStream = NULL;
+        }
         if (self->_handle) {
             uvc_close(self->_handle);
             self->_handle = NULL;
