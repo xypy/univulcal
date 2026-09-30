@@ -2,6 +2,11 @@
 #include <libuvc/libuvc.h>
 #include <string.h>
 
+// Exported by the bundled libuvc, although omitted from its public header.
+extern uvc_error_t uvc_query_stream_ctrl(uvc_device_handle_t *devh,
+                                         uvc_stream_ctrl_t *ctrl, uint8_t probe,
+                                         enum uvc_req_code req);
+
 typedef struct {
     enum uvc_frame_format format;
     int width;
@@ -56,7 +61,9 @@ static void MNUVCFrameCallback(uvc_frame_t *frame, void *userPointer);
         }
 
         uvc_device_descriptor_t *deviceDescriptor = NULL;
+        BOOL isHagibis = NO;
         if (uvc_get_device_descriptor(self->_device, &deviceDescriptor) == UVC_SUCCESS && deviceDescriptor) {
+            isHagibis = deviceDescriptor->idVendor == 0x1de1 && deviceDescriptor->idProduct == 0xf104;
             [self note:[NSString stringWithFormat:@"device vid=%04x pid=%04x product=%s",
                         deviceDescriptor->idVendor, deviceDescriptor->idProduct,
                         deviceDescriptor->product ?: "(unknown)"]];
@@ -123,12 +130,41 @@ static void MNUVCFrameCallback(uvc_frame_t *frame, void *userPointer);
             result = uvc_get_stream_ctrl_format_size(self->_handle, &self->_streamControl,
                                                       mode.format, mode.width, mode.height, mode.fps);
             [self note:[NSString stringWithFormat:
-                        @"attempt %lu %@ %dx%d@%d result=%s (%d) control format=%u frame=%u interval=%u",
+                        @"attempt %lu %@ %dx%d@%d result=%s (%d) control format=%u frame=%u interval=%u frameBytes=%u payloadBytes=%u",
                         (unsigned long)(index + 1),
                         mode.format == UVC_FRAME_FORMAT_MJPEG ? @"MJPEG" : @"YUYV",
                         mode.width, mode.height, mode.fps, uvc_strerror(result), result,
                         self->_streamControl.bFormatIndex, self->_streamControl.bFrameIndex,
-                        self->_streamControl.dwFrameInterval]];
+                        self->_streamControl.dwFrameInterval,
+                        self->_streamControl.dwMaxVideoFrameSize,
+                        self->_streamControl.dwMaxPayloadTransferSize]];
+            if (result == UVC_ERROR_INVALID_MODE && isHagibis && mode.format == UVC_FRAME_FORMAT_MJPEG) {
+                uvc_stream_ctrl_t current = self->_streamControl;
+                uvc_error_t queryResult = uvc_query_stream_ctrl(self->_handle, &current, 1, UVC_GET_CUR);
+                BOOL matchingDescriptor = NO;
+                for (const uvc_format_desc_t *candidate = format; candidate; candidate = candidate->next) {
+                    if (candidate->bDescriptorSubtype != UVC_VS_FORMAT_MJPEG ||
+                        candidate->bFormatIndex != current.bFormatIndex) continue;
+                    for (const uvc_frame_desc_t *frame = candidate->frame_descs; frame; frame = frame->next) {
+                        if (frame->bFrameIndex != current.bFrameIndex ||
+                            frame->wWidth != mode.width || frame->wHeight != mode.height) continue;
+                        for (NSUInteger interval = 0; frame->intervals && frame->intervals[interval]; interval++) {
+                            if (frame->intervals[interval] == current.dwFrameInterval) matchingDescriptor = YES;
+                        }
+                    }
+                }
+                [self note:[NSString stringWithFormat:
+                            @"Hagibis GET_CUR result=%s (%d) format=%u frame=%u interval=%u frameBytes=%u payloadBytes=%u descriptorMatch=%@",
+                            uvc_strerror(queryResult), queryResult, current.bFormatIndex, current.bFrameIndex,
+                            current.dwFrameInterval, current.dwMaxVideoFrameSize,
+                            current.dwMaxPayloadTransferSize, matchingDescriptor ? @"YES" : @"NO"]];
+                if (queryResult == UVC_SUCCESS && matchingDescriptor &&
+                    current.dwMaxVideoFrameSize > 0 && current.dwMaxPayloadTransferSize > 0) {
+                    self->_streamControl = current;
+                    result = UVC_SUCCESS;
+                    [self note:@"accepted camera's valid GET_CUR control; bundled libuvc rejects changed payload size"];
+                }
+            }
             if (result == UVC_SUCCESS) {
                 requestedWidth = mode.width;
                 requestedHeight = mode.height;
