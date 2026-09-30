@@ -5,6 +5,7 @@ NS_ASSUME_NONNULL_BEGIN
 @protocol MNDirectUVCBackendDelegate <NSObject>
 - (void)uvcBackendDidStartWithWidth:(NSUInteger)width height:(NSUInteger)height fps:(NSUInteger)fps;
 - (void)uvcBackendDidReceiveRGB:(NSData *)rgb width:(NSUInteger)width height:(NSUInteger)height;
+- (void)uvcBackendDidLog:(NSString *)message;
 - (void)uvcBackendDidFail:(NSString *)message;
 @end
 

@@ -108,8 +108,9 @@ final class CaptureSessionManager: NSObject, ObservableObject {
     func start(device: AVCaptureDevice? = nil) {
         log("capture.start", "requested; directUVC=\(usesDirectUVC)")
         if usesDirectUVC {
-            log("uvc.start", "request native resolution; fps=60")
-            directBackend.start(withWidth: 0, height: 0, fps: 60)
+            let requestedFPS: UInt = selectedFrameRate == "30 fps" ? 30 : selectedFrameRate == "24 fps" ? 24 : 60
+            log("uvc.start", "request native resolution; fps=\(requestedFPS)")
+            directBackend.start(withWidth: 0, height: 0, fps: requestedFPS)
             DispatchQueue.main.async {
                 self.isRunning = true
                 if self.status == "Connect a UVC capture card" { self.status = "Opening direct UVC…" }
@@ -296,6 +297,10 @@ extension CaptureSessionManager: AVCaptureVideoDataOutputSampleBufferDelegate, A
 }
 
 extension CaptureSessionManager: MNDirectUVCBackendDelegate {
+    func uvcBackendDidLog(_ message: String) {
+        log("ERROR.uvc.detail", message)
+    }
+
     func uvcBackendDidStart(withWidth width: UInt, height: UInt, fps: UInt) {
         log("uvc.ready", "width=\(width) height=\(height) fps=\(fps)")
         var audioLive = false

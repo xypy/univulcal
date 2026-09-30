@@ -1,5 +1,23 @@
 #import "DirectUVCBackend.h"
 #include <libuvc/libuvc.h>
+#include <string.h>
+
+typedef struct {
+    enum uvc_frame_format format;
+    int width;
+    int height;
+    int fps;
+} MNUVCMode;
+
+static void MNAppendMode(MNUVCMode *modes, NSUInteger *count, NSUInteger capacity,
+                         enum uvc_frame_format format, int width, int height, int fps) {
+    if (width <= 0 || height <= 0 || fps <= 0 || *count >= capacity) return;
+    for (NSUInteger index = 0; index < *count; index++) {
+        if (modes[index].format == format && modes[index].width == width &&
+            modes[index].height == height && modes[index].fps == fps) return;
+    }
+    modes[(*count)++] = (MNUVCMode){format, width, height, fps};
+}
 
 @interface MNDirectUVCBackend () {
     uvc_context_t *_context;
@@ -37,6 +55,14 @@ static void MNUVCFrameCallback(uvc_frame_t *frame, void *userPointer);
             return;
         }
 
+        uvc_device_descriptor_t *deviceDescriptor = NULL;
+        if (uvc_get_device_descriptor(self->_device, &deviceDescriptor) == UVC_SUCCESS && deviceDescriptor) {
+            [self note:[NSString stringWithFormat:@"device vid=%04x pid=%04x product=%s",
+                        deviceDescriptor->idVendor, deviceDescriptor->idProduct,
+                        deviceDescriptor->product ?: "(unknown)"]];
+            uvc_free_device_descriptor(deviceDescriptor);
+        }
+
         result = uvc_open(self->_device, &self->_handle);
         if (result < 0) {
             [self fail:[NSString stringWithFormat:@"uvc_open failed: %s (%d)", uvc_strerror(result), result]];
@@ -45,26 +71,74 @@ static void MNUVCFrameCallback(uvc_frame_t *frame, void *userPointer);
 
         int requestedWidth = (int)width;
         int requestedHeight = (int)height;
-        int requestedFPS = (int)fps;
+        int requestedFPS = fps == 0 ? 60 : (int)fps;
+        const uvc_format_desc_t *format = uvc_get_format_descs(self->_handle);
+        NSUInteger loggedFrames = 0;
+        for (const uvc_format_desc_t *candidateFormat = format;
+             candidateFormat && loggedFrames < 48; candidateFormat = candidateFormat->next) {
+            for (const uvc_frame_desc_t *frame = candidateFormat->frame_descs;
+                 frame && loggedFrames < 48; frame = frame->next, loggedFrames++) {
+                NSMutableString *rates = [NSMutableString string];
+                if (frame->intervals) {
+                    for (NSUInteger index = 0; frame->intervals[index] && index < 8; index++) {
+                        [rates appendFormat:@" %.2f", 10000000.0 / frame->intervals[index]];
+                    }
+                }
+                [self note:[NSString stringWithFormat:
+                            @"descriptor format=%u subtype=%u frame=%u %ux%u default=%.2f fps=%@",
+                            candidateFormat->bFormatIndex, candidateFormat->bDescriptorSubtype,
+                            frame->bFrameIndex, frame->wWidth, frame->wHeight,
+                            frame->dwDefaultFrameInterval ? 10000000.0 / frame->dwDefaultFrameInterval : 0.0,
+                            rates]];
+            }
+        }
         if (requestedWidth == 0 || requestedHeight == 0) {
-            const uvc_format_desc_t *format = uvc_get_format_descs(self->_handle);
             while (format && !format->frame_descs) { format = format->next; }
             if (format && format->frame_descs) {
                 requestedWidth = (int)format->frame_descs->wWidth;
                 requestedHeight = (int)format->frame_descs->wHeight;
             }
         }
-        if (requestedFPS == 0) { requestedFPS = 60; }
-        result = uvc_get_stream_ctrl_format_size(self->_handle, &self->_streamControl,
-                                                  UVC_FRAME_FORMAT_YUYV,
-                                                  requestedWidth, requestedHeight, requestedFPS);
-        if (result < 0) {
+
+        MNUVCMode modes[24];
+        NSUInteger modeCount = 0;
+#define ADD_PAIR(W, H, FPS) \
+    MNAppendMode(modes, &modeCount, 24, UVC_FRAME_FORMAT_MJPEG, (W), (H), (FPS)); \
+    MNAppendMode(modes, &modeCount, 24, UVC_FRAME_FORMAT_YUYV, (W), (H), (FPS))
+        ADD_PAIR(requestedWidth, requestedHeight, requestedFPS);
+        ADD_PAIR(1920, 1080, requestedFPS);
+        ADD_PAIR(1280, 720, requestedFPS);
+        ADD_PAIR(1920, 1080, 30);
+        ADD_PAIR(1280, 720, 30);
+        ADD_PAIR(640, 480, 30);
+        ADD_PAIR(1920, 1080, 15);
+        ADD_PAIR(1280, 720, 15);
+        ADD_PAIR(640, 480, 15);
+#undef ADD_PAIR
+
+        result = UVC_ERROR_INVALID_MODE;
+        for (NSUInteger index = 0; index < modeCount; index++) {
+            MNUVCMode mode = modes[index];
+            memset(&self->_streamControl, 0, sizeof(self->_streamControl));
             result = uvc_get_stream_ctrl_format_size(self->_handle, &self->_streamControl,
-                                                      UVC_FRAME_FORMAT_MJPEG,
-                                                      requestedWidth, requestedHeight, requestedFPS);
+                                                      mode.format, mode.width, mode.height, mode.fps);
+            [self note:[NSString stringWithFormat:
+                        @"attempt %lu %@ %dx%d@%d result=%s (%d) control format=%u frame=%u interval=%u",
+                        (unsigned long)(index + 1),
+                        mode.format == UVC_FRAME_FORMAT_MJPEG ? @"MJPEG" : @"YUYV",
+                        mode.width, mode.height, mode.fps, uvc_strerror(result), result,
+                        self->_streamControl.bFormatIndex, self->_streamControl.bFrameIndex,
+                        self->_streamControl.dwFrameInterval]];
+            if (result == UVC_SUCCESS) {
+                requestedWidth = mode.width;
+                requestedHeight = mode.height;
+                requestedFPS = mode.fps;
+                break;
+            }
         }
         if (result < 0) {
-            [self fail:[NSString stringWithFormat:@"no matching UVC mode: %s (%d)", uvc_strerror(result), result]];
+            [self fail:[NSString stringWithFormat:@"UVC negotiation failed after %lu attempts: %s (%d); see monicon.log",
+                        (unsigned long)modeCount, uvc_strerror(result), result]];
             return;
         }
 
@@ -78,6 +152,12 @@ static void MNUVCFrameCallback(uvc_frame_t *frame, void *userPointer);
         dispatch_async(dispatch_get_main_queue(), ^{
             [self.delegate uvcBackendDidStartWithWidth:(NSUInteger)requestedWidth height:(NSUInteger)requestedHeight fps:(NSUInteger)requestedFPS];
         });
+    });
+}
+
+- (void)note:(NSString *)message {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self.delegate uvcBackendDidLog:message];
     });
 }
 
