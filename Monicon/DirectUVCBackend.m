@@ -182,6 +182,17 @@ static void MNUVCFrameCallback(uvc_frame_t *frame, void *userPointer);
             return;
         }
 
+        // This card reports a 3.1 MB bulk payload for every resolution. The
+        // bundled libuvc uses that value as the size of each USB read. Probe
+        // whether smaller reads allow the active HDMI stream to complete.
+        if (isHagibis && self->_streamControl.dwMaxPayloadTransferSize > 65536) {
+            uint32_t reportedSize = self->_streamControl.dwMaxPayloadTransferSize;
+            self->_streamControl.dwMaxPayloadTransferSize = 65536;
+            [self note:[NSString stringWithFormat:
+                        @"Hagibis bulk payload probe: reported=%u requested=%u",
+                        reportedSize, self->_streamControl.dwMaxPayloadTransferSize]];
+        }
+
         result = uvc_start_streaming(self->_handle, &self->_streamControl, MNUVCFrameCallback, (__bridge void *)self, 0);
         if (result < 0) {
             [self fail:[NSString stringWithFormat:@"uvc_start_streaming failed: %s (%d)", uvc_strerror(result), result]];
