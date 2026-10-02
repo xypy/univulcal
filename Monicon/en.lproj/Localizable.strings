@@ -1,4 +1,4 @@
-"app.name" = "univulcal";
+"app.name" = "Monicon";
 "status.live" = "LIVE";
 "status.idle" = "IDLE";
 "button.start" = "Start";
@@ -30,4 +30,4 @@
 "record.hint" = "Short press to take a screenshot; double tap to start or stop recording.";
 
 "settings.log" = "Diagnostic log";
-"settings.log.help" = "When enabled, prints [Monicon][log] ok once per second, reports errors immediately, and saves details to Files > UVC Reader > monicon.log.";
+"settings.log.help" = "When enabled, prints [Monicon][log] ok once per second, reports errors immediately, and saves details to Files > Monicon > monicon.log.";

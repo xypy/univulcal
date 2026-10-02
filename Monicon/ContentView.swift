@@ -14,7 +14,7 @@ struct ContentView: View {
             VStack(spacing: 0) {
                 if !isFullscreen {
                     HStack {
-                        Label(L("app.name"), systemImage: "gamecontroller.fill")
+                        Label(L("app.name"), systemImage: "play.rectangle.on.rectangle.fill")
                             .font(.headline.weight(.bold))
                         Spacer()
                         Circle().fill(capture.isRunning ? .green : .gray).frame(width: 8, height: 8)
@@ -193,8 +193,8 @@ struct SettingsView: View {
                     Text(L("settings.video.help")).font(.caption).foregroundStyle(.secondary)
                 }
                 Section(L("settings.links")) {
-                    Link(L("link.issue"), destination: URL(string: "https://github.com/twoyears666/monicon/issues/new")!)
-                    Link(L("link.repository"), destination: URL(string: "https://github.com/twoyears666/monicon")!)
+                    Link(L("link.issue"), destination: URL(string: "https://github.com/xypy/univulcal/issues/new")!)
+                    Link(L("link.repository"), destination: URL(string: "https://github.com/xypy/univulcal")!)
                 }
             }
             .navigationTitle(L("settings.title"))

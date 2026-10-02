@@ -1,4 +1,4 @@
-"app.name" = "univulcal";
+"app.name" = "Monicon";
 "status.live" = "直播中";
 "status.idle" = "未连接";
 "button.start" = "开始";
@@ -30,4 +30,4 @@
 "record.hint" = "短按截图；双击开始或结束录制。";
 
 "settings.log" = "日志模式";
-"settings.log.help" = "开启后每秒打印一次 [Monicon][log] ok，出现问题立即输出错误，并保存到“文件”App → UVC读卡器 → monicon.log。";
+"settings.log.help" = "开启后每秒打印一次 [Monicon][log] ok，出现问题立即输出错误，并保存到“文件”App → Monicon → monicon.log。";

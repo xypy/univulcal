@@ -10,10 +10,12 @@ jobs:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
-      - name: Prepare iOS libuvc/libusb dependencies
+      - name: Verify bundled iOS libraries and app icon
         run: |
-          git clone --depth 1 https://github.com/danylokos/LiveView.git /tmp/LiveView
-          cp -R /tmp/LiveView/Thirdparties .
+          test -f Thirdparties/libs/ios/libuvc.a
+          test -f Thirdparties/libs/ios/libusb-1.0.a
+          test -f Thirdparties/libs/ios/libjpeg.a
+          test -f Monicon/Assets.xcassets/AppIcon.appiconset/Monicon-1024.png
 
       - name: Build iPadOS 16 app
         run: |
@@ -35,18 +37,21 @@ jobs:
           test -d "$APP"
           EXECUTABLE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Info.plist")"
           test -f "$APP/$EXECUTABLE"
+          test -f "$APP/Assets.car"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP/Info.plist")" = "Monicon"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Info.plist")" = "1.0.0"
           file "$APP/$EXECUTABLE" | grep -E "Mach-O|executable"
           mkdir -p build/Payload
           ditto "$APP" "build/Payload/Monicon.app"
           codesign --force --deep --sign - --entitlements Monicon/MoniconUSB.entitlements "build/Payload/Monicon.app"
           cd build
-          /usr/bin/zip -qry -y Monicon-ios16.tipa Payload
-          unzip -l Monicon-ios16.tipa | grep -E "Payload/Monicon.app/Monicon$|Payload/Monicon.app/Info.plist$"
-          printf '%s\n' "1. Download the GitHub Actions artifact ZIP." "2. Unzip that outer ZIP once." "3. Install the inner Monicon-ios16.tipa file with TrollStore." "Do not rename the outer artifact ZIP to .tipa." > TIPA-INSTALL.txt
+          /usr/bin/zip -qry -y Monicon-1.0.0.tipa Payload
+          unzip -l Monicon-1.0.0.tipa | grep -E "Payload/Monicon.app/Monicon$|Payload/Monicon.app/Info.plist$|Payload/Monicon.app/Assets.car$"
+          printf '%s\n' "1. Download the GitHub Actions artifact ZIP." "2. Unzip that outer ZIP once." "3. Install the inner Monicon-1.0.0.tipa file with TrollStore." "4. This app installs beside UVC Diagnostic because it has a separate bundle ID." > TIPA-INSTALL.txt
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Monicon-ios16-tipa
+          name: Monicon-1.0.0-tipa
           path: |
-            build/Monicon-ios16.tipa
+            build/Monicon-1.0.0.tipa
             build/TIPA-INSTALL.txt

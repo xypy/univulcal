@@ -1,4 +1,4 @@
-"app.name" = "univulcal";
+"app.name" = "Monicon";
 "status.live" = "라이브";
 "status.idle" = "대기 중";
 "button.start" = "시작";
@@ -30,4 +30,4 @@
 "record.hint" = "짧게 누르면 스크린샷, 두 번 누르면 녹화를 시작하거나 중지합니다.";
 
 "settings.log" = "진단 로그";
-"settings.log.help" = "켜면 매초 [Monicon][log] ok를 출력하고 오류를 즉시 보고하며 파일 앱의 UVC读卡器/monicon.log에 저장합니다.";
+"settings.log.help" = "켜면 매초 [Monicon][log] ok를 출력하고 오류를 즉시 보고하며 파일 앱의 Monicon/monicon.log에 저장합니다.";
