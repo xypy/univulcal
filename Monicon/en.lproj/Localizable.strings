@@ -13,7 +13,7 @@
 "settings.scale" = "Display scale";
 "settings.scale.help" = "Percentage of the capture card's native resolution.";
 "settings.frameRate" = "Frame rate";
-"settings.frameRate.help" = "Keep the current frame-rate options; maximum performance is not required.";
+"settings.frameRate.help" = "Choose a frame rate supported by the capture card. Stop and start again to apply it.";
 "settings.audio" = "Capture-card audio";
 "settings.audio.help" = "When off, Monicon does not play capture-card audio or use the iPad microphone.";
 "settings.video" = "Video";

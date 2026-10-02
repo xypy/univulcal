@@ -13,7 +13,7 @@
 "settings.scale" = "画面缩放";
 "settings.scale.help" = "按照采集卡原生分辨率的百分比缩放。";
 "settings.frameRate" = "帧率";
-"settings.frameRate.help" = "保留现有帧率选项；上线版本不强求跑满最高帧率。";
+"settings.frameRate.help" = "选择采集卡支持的帧率；停止后重新开始生效。";
 "settings.audio" = "采集卡音频";
 "settings.audio.help" = "关闭后不播放采集卡声音，也不使用 iPad 麦克风。";
 "settings.video" = "画面";

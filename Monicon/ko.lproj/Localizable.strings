@@ -13,7 +13,7 @@
 "settings.scale" = "화면 배율";
 "settings.scale.help" = "캡처 카드의 기본 해상도를 기준으로 한 배율입니다.";
 "settings.frameRate" = "프레임 속도";
-"settings.frameRate.help" = "현재 프레임 속도 옵션을 유지합니다. 최고 프레임 속도는 필수가 아닙니다.";
+"settings.frameRate.help" = "캡처 카드가 지원하는 프레임 속도를 선택하세요. 중지한 후 다시 시작하면 적용됩니다.";
 "settings.audio" = "캡처 카드 오디오";
 "settings.audio.help" = "끄면 캡처 카드 소리를 재생하지 않으며 iPad 마이크도 사용하지 않습니다.";
 "settings.video" = "비디오";
